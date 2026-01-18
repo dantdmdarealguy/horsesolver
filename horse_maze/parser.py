@@ -19,6 +19,11 @@ def _cell_from_token(tok: str) -> Cell:
     if tok == "W":
         return Cell(token=tok, kind="wall", value=0)
 
+    # Allow loading a saved solution file with blocks already placed.
+    # Treat Blocks as impassable.
+    if tok == "B":
+        return Cell(token=tok, kind="wall", value=0)
+
     if tok == "H":
         return Cell(token=tok, kind="horse", value=0)
 
@@ -27,8 +32,8 @@ def _cell_from_token(tok: str) -> Cell:
         return Cell(token=tok, kind="item", value=3)
     if tok == "A":
         return Cell(token=tok, kind="item", value=10)
-    # Bees (negative)
-    if tok in {"E", "B", "BEE", "Bee"}:
+    # Bees (negative) — use E to avoid conflict with Blocks
+    if tok in {"E", "BEE", "Bee"}:
         return Cell(token=tok, kind="item", value=-5)
 
     # Portals

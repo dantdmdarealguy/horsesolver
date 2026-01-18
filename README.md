@@ -36,6 +36,9 @@ Tokens should be separated by spaces if using portals.
 pip install -r requirements.txt
 
 python run.py examples/demo.txt
+OR
+python run.py examples/demo.txt --gui
+The gui is recommended
 
 ## Output
 - Maximum score
