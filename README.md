@@ -34,20 +34,37 @@ Blocks:
 
 ## Input format (text file)
 
-rows cols
-max_blocks
-<row 0 tokens>
-<row 1 tokens>
-...
-<row rows-1 tokens>
+`rows cols`
 
-Tokens should be space-separated (especially important for portals like `P0`).
+`max_blocks`
+
+`<row 0 tokens>`
+
+`<row 1 tokens>`
+
+...
+
+`<row rows-1 tokens>`
+
+Tokens should be space-separated (especially important for portals like `P0`). Each line should also be seperated on a new line as shown.
+
+OR
+
+Raw JSON from the script tag at the bottom of the source code page from the puzzle you wish to solve on enclose.horse
+
+Example:
+gaycircle_json.txt
+`"map":"2~~~~~~1~~~~~~0\n~~~~~....1~~~~~\n~~~2........~~~\n~~...~~.~~..0~~\n~~...........~~\n~3.~..~.~..~..~\n~..~.~...~.~..~\n3......H......7\n~..~.~...~.~..~\n~..~..~.~..~.7~\n~~...........~~\n~~4..~~.~~...~~\n~~~........6~~~\n~~~~~5....~~~~~\n4~~~~~~5~~~~~~6","budget":13`
+
+(All should be pasted on one line)
+
+(File names do not matter, this was just an example)
 
 ---
 
 ## Install
 
-pip install -r requirements.txt
+`pip install -r requirements.txt`
 
 ---
 
