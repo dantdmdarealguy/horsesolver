@@ -1,0 +1,17 @@
+15 15
+13
+P2 W W W W W W P1 W W W W W W P0
+W W W W W . . . . P1 W W W W W
+W W W P2 . . . . . . . . W W W
+W W . . . W W . W W . . P0 W W
+W W . . . . . . . . . . . W W
+W P3 . W . . W . W . . W . . W
+W . . W . W . . . W . W . . W
+P3 . . . . . . H . . . . . . P7
+W . . W . W . . . W . W . . W
+W . . W . . W . W . . W . P7 W
+W W . . . . . . . . . . . W W
+W W P4 . . W W . W W . . . W W
+W W W . . . . . . . . P6 W W W
+W W W W W P5 . . . . W W W W W
+P4 W W W W W W P5 W W W W W W P6
