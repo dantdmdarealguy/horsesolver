@@ -13,30 +13,28 @@ def render_solution(p: Puzzle, sol: Solution) -> str:
         lines.append("Block placements (row, col):")
         for (r, c) in sorted(sol.blocks):
             lines.append(f"  - ({r}, {c})")
-    else:
-        lines.append("No blocks needed.")
-
     lines.append("")
-    lines.append("Final grid (BLK = block, [] = enclosed cells):")
 
-    # Render tokens; blocks override air only
     for r in range(p.rows):
         row_tokens: List[str] = []
         for c in range(p.cols):
             rc = (r, c)
             cell = p.grid[r][c]
+
+            # Blocks override (you only place blocks on air)
+            if rc in sol.blocks:
+                row_tokens.append("B")
+                continue
+
             tok = cell.token
 
-            if rc in sol.blocks:
-                tok = "BLK"
-
-            # Mark enclosed/reachable
-            if rc in sol.reachable and cell.kind != "wall":
+            # Highlight only enclosed cells that "got points"
+            # (i.e., are reachable AND have non-zero value)
+            if rc in sol.reachable and cell.value != 0:
                 tok = f"[{tok}]"
-            else:
-                tok = f" {tok} "
 
             row_tokens.append(tok)
+
         lines.append(" ".join(row_tokens))
 
     return "\n".join(lines)
