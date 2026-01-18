@@ -9,12 +9,11 @@ from PIL import Image, ImageDraw, ImageFont
 
 from horse_maze.types import Puzzle, Solution, Coord
 from horse_maze.grid import neighbors_4, is_boundary
-from horse_maze.verify import compute_reachable, score_region
+from horse_maze.verify import compute_reachable, score_region, find_escape_path
 
 CELL = 42  # px
 
 def _cell_style(token: str) -> Dict[str, str]:
-    # palette
     if token == "W":
         return {"fill": "#2b2b2b", "text": "white"}
     if token == "H":
@@ -51,10 +50,6 @@ def _passable(p: Puzzle, rc: Coord, blocks: Set[Coord]) -> bool:
     return True
 
 def _bfs_steps(p: Puzzle, blocks: Set[Coord]) -> List[Coord]:
-    """
-    Returns the order in which cells are discovered by BFS from the horse,
-    including portal teleports as edges.
-    """
     start = p.horse
     portal_pair = _build_portal_pair(p)
 
@@ -65,14 +60,12 @@ def _bfs_steps(p: Puzzle, blocks: Set[Coord]) -> List[Coord]:
     while q:
         u = q.popleft()
 
-        # normal neighbors
         for v in neighbors_4(p, u):
             if _passable(p, v, blocks) and v not in seen:
                 seen.add(v)
                 q.append(v)
                 order.append(v)
 
-        # portal jump
         ur, uc = u
         if p.grid[ur][uc].kind == "portal":
             v = portal_pair.get(u)
@@ -84,39 +77,51 @@ def _bfs_steps(p: Puzzle, blocks: Set[Coord]) -> List[Coord]:
     return order
 
 class HorseMazeGUI:
-    def __init__(self, p: Puzzle, sol: Solution):
+    """
+    mode="solve": shows a fixed solution (blocks are not editable)
+    mode="play": user can place/remove blocks on air with left click (max blocks enforced)
+    """
+    def __init__(self, p: Puzzle, sol: Optional[Solution], mode: str):
         self.p = p
+        self.mode = mode
         self.sol = sol
-        self.blocks = set(sol.blocks)
 
-        # Always compute true region for correctness
-        self.true_region = compute_reachable(p, self.blocks)
-        self.true_score = score_region(p, self.true_region)
-        self.escaped = any(is_boundary(p, rc) for rc in self.true_region)
+        # blocks
+        if mode == "solve":
+            assert sol is not None
+            self.blocks = set(sol.blocks)
+        else:
+            self.blocks = set()  # start empty in play mode
 
-        # Animation state
-        self.bfs_order = _bfs_steps(p, self.blocks)
+        # region/score state (computed each redraw/update)
+        self.true_region: Set[Coord] = set()
+        self.true_score: int = 0
+        self.escape_path: Optional[List[Coord]] = None
+
+        # Animation
+        self.bfs_order: List[Coord] = []
         self.anim_index = 0
         self.anim_running = False
-        self.anim_region: Set[Coord] = set()  # region shown during animation
+        self.anim_region: Set[Coord] = set()
 
-        # UI state toggles
-        self.show_reachable_outline = tk.BooleanVar(value=True)
-        self.show_boundary_marks = tk.BooleanVar(value=True)
-        self.dim_walls = tk.BooleanVar(value=False)
-        self.show_values = tk.BooleanVar(value=False)
-        self.outline_scoring_only = tk.BooleanVar(value=False)
-
-        self.speed_ms = tk.IntVar(value=40)  # animation delay
 
         self.root = tk.Tk()
         self.root.title("Horse Maze Solver")
+        # Toggles / options (bind to this root explicitly)
+        self.show_reachable_outline = tk.BooleanVar(master=self.root, value=True)
+        self.show_boundary_marks = tk.BooleanVar(master=self.root, value=True)
+        self.dim_walls = tk.BooleanVar(master=self.root, value=False)
+        self.show_values = tk.BooleanVar(master=self.root, value=False)
+        self.outline_scoring_only = tk.BooleanVar(master=self.root, value=False)
+        self.show_escape_overlay = tk.BooleanVar(master=self.root, value=True)
+
+        self.speed_ms = tk.IntVar(master=self.root, value=40)
 
         self._build_ui()
+        self._recompute_state(reset_anim=True)
         self._redraw()
 
     def _build_ui(self):
-        # Main layout: left controls + right canvas
         outer = tk.Frame(self.root)
         outer.pack(fill=tk.BOTH, expand=True)
 
@@ -126,35 +131,30 @@ class HorseMazeGUI:
         right = tk.Frame(outer)
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-        # Info label top
-        self.info_label = tk.Label(
-            left,
-            text="",
-            font=("Segoe UI", 11),
-            justify=tk.LEFT,
-            wraplength=320,
-        )
+        self.info_label = tk.Label(left, text="", font=("Segoe UI", 11), justify=tk.LEFT, wraplength=340)
         self.info_label.pack(anchor="w", pady=(0, 10))
 
-        # Toggles
-        tk.Label(left, text="Overlays", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(5, 2))
+        self.status_var = tk.StringVar(value="")
+        self.status_label = tk.Label(left, textvariable=self.status_var, font=("Segoe UI", 10), fg="#2d3748", justify=tk.LEFT, wraplength=340)
+        self.status_label.pack(anchor="w", pady=(0, 10))
 
+        tk.Label(left, text="Overlays", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(5, 2))
         tk.Checkbutton(left, text="Reachable outline", variable=self.show_reachable_outline, command=self._redraw).pack(anchor="w")
         tk.Checkbutton(left, text="Boundary (escape) marks", variable=self.show_boundary_marks, command=self._redraw).pack(anchor="w")
+        tk.Checkbutton(left, text="Escape path overlay", variable=self.show_escape_overlay, command=self._redraw).pack(anchor="w")
         tk.Checkbutton(left, text="Dim walls", variable=self.dim_walls, command=self._redraw).pack(anchor="w")
         tk.Checkbutton(left, text="Show value labels", variable=self.show_values, command=self._redraw).pack(anchor="w")
         tk.Checkbutton(left, text="Outline scoring only", variable=self.outline_scoring_only, command=self._redraw).pack(anchor="w")
 
-        # Actions
         tk.Label(left, text="Actions", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(12, 2))
-
         tk.Button(left, text="Copy block placements", command=self._copy_blocks).pack(fill=tk.X, pady=2)
-        tk.Button(left, text="Save solved grid (.txt)", command=self._save_grid).pack(fill=tk.X, pady=2)
+        tk.Button(left, text="Save grid (.txt)", command=self._save_grid).pack(fill=tk.X, pady=2)
         tk.Button(left, text="Save screenshot (.png)", command=self._save_png).pack(fill=tk.X, pady=2)
 
-        # Animation controls
-        tk.Label(left, text="Animation (BFS reach)", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(12, 2))
+        tk.Label(left, text="Escape / Debug", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(12, 2))
+        tk.Button(left, text="Check escape path", command=self._check_escape_path).pack(fill=tk.X, pady=2)
 
+        tk.Label(left, text="Animation (BFS reach)", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(12, 2))
         row = tk.Frame(left)
         row.pack(fill=tk.X, pady=2)
         tk.Button(row, text="Start", command=self._anim_start).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
@@ -164,13 +164,17 @@ class HorseMazeGUI:
         tk.Label(left, text="Speed (ms/step)").pack(anchor="w", pady=(8, 0))
         tk.Scale(left, from_=5, to=250, orient=tk.HORIZONTAL, variable=self.speed_ms).pack(fill=tk.X)
 
-        # Inspector panel
+        if self.mode == "play":
+            tk.Label(left, text="Play mode", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(12, 2))
+            tk.Label(left, text="Left click an AIR cell to toggle a Block.\nRight click to inspect only.",
+                     font=("Segoe UI", 9), justify=tk.LEFT, wraplength=340).pack(anchor="w", pady=(0, 6))
+            tk.Button(left, text="Clear all blocks", command=self._clear_blocks).pack(fill=tk.X, pady=2)
+
         tk.Label(left, text="Inspector", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(12, 2))
         self.inspect_text = tk.StringVar(value="Hover or click a cell.")
-        self.inspect_label = tk.Label(left, textvariable=self.inspect_text, justify=tk.LEFT, font=("Consolas", 10), wraplength=320)
+        self.inspect_label = tk.Label(left, textvariable=self.inspect_text, justify=tk.LEFT, font=("Consolas", 10), wraplength=340)
         self.inspect_label.pack(anchor="w")
 
-        # Scrollable canvas
         self.canvas = tk.Canvas(right, bg="white")
         self.canvas.grid(row=0, column=0, sticky="nsew")
 
@@ -183,32 +187,53 @@ class HorseMazeGUI:
         right.grid_rowconfigure(0, weight=1)
         right.grid_columnconfigure(0, weight=1)
 
-        # Bind hover/click
         self.canvas.bind("<Motion>", self._on_hover)
-        self.canvas.bind("<Button-1>", self._on_click)
+        self.canvas.bind("<Button-1>", self._on_left_click)
+        self.canvas.bind("<Button-3>", self._on_right_click)
+
+    def _recompute_state(self, reset_anim: bool):
+        self.true_region = compute_reachable(self.p, self.blocks)
+        self.true_score = score_region(self.p, self.true_region)
+        self.escape_path = find_escape_path(self.p, self.blocks)  # None if enclosed
+
+        if reset_anim:
+            self.bfs_order = _bfs_steps(self.p, self.blocks)
+            self.anim_index = 0
+            self.anim_running = False
+            self.anim_region = set()
 
     def _current_region_for_display(self) -> Set[Coord]:
-        # If anim is running or has progressed, show anim_region; else show full true region
         if self.anim_index > 0 or self.anim_running:
             return set(self.anim_region)
         return set(self.true_region)
 
-    def _update_info_label(self):
-        msg = (
-            f"Score: {self.sol.max_score} (computed {self.true_score})\n"
-            f"Blocks: {len(self.blocks)}/{self.p.max_blocks}\n"
-            f"Grid: {self.p.rows} x {self.p.cols}"
-        )
-        if self.escaped:
-            msg += "\nWARNING: Horse can reach boundary!"
+    def _update_info_and_status(self):
+        # Score in solve mode: solver objective; play mode: computed score
+        if self.mode == "solve":
+            assert self.sol is not None
+            shown_score = self.sol.max_score
+            msg = f"Mode: SOLVE (bot)\nScore: {shown_score} (computed {self.true_score})\nBlocks: {len(self.blocks)}/{self.p.max_blocks}\nGrid: {self.p.rows} x {self.p.cols}"
+        else:
+            msg = f"Mode: PLAY (manual)\nScore (computed): {self.true_score}\nBlocks: {len(self.blocks)}/{self.p.max_blocks}\nGrid: {self.p.rows} x {self.p.cols}"
+
+        if self.escape_path is not None:
+            msg += "\nWARNING: Horse can escape to boundary!"
+
         self.info_label.config(text=msg)
 
+        if self.escape_path is None:
+            self.status_var.set("Enclosed ✅  (horse cannot reach the boundary)")
+        else:
+            end = self.escape_path[-1]
+            self.status_var.set(f"Not enclosed ❌  (escape path exists to boundary cell {end}). Use 'Check escape path' to display details.")
+
     def _redraw(self):
-        self._update_info_label()
+        self._update_info_and_status()
         self.canvas.delete("all")
 
         region = self._current_region_for_display()
         portal_pair = _build_portal_pair(self.p)
+        esc_path_set = set(self.escape_path or [])
 
         width = self.p.cols * CELL
         height = self.p.rows * CELL
@@ -217,18 +242,12 @@ class HorseMazeGUI:
             for c in range(self.p.cols):
                 rc = (r, c)
                 cell = self.p.grid[r][c]
-                tok = cell.token
-
-                # blocks override
-                if rc in self.blocks:
-                    tok = "B"
+                tok = "B" if rc in self.blocks else cell.token
 
                 style = _cell_style(tok)
-
                 fill = style["fill"]
                 text_color = style["text"]
 
-                # dim walls option
                 if self.dim_walls.get() and tok == "W":
                     fill = "#4a5568"
 
@@ -245,13 +264,19 @@ class HorseMazeGUI:
                 # reachable outline
                 if self.show_reachable_outline.get():
                     if rc in region and cell.kind != "wall" and tok != "B":
+                        do_outline = True
                         if self.outline_scoring_only.get():
-                            if cell.value != 0:
-                                self.canvas.itemconfig(rect, outline="#00b5d8", width=3)
-                        else:
+                            do_outline = (cell.value != 0)
+                        if do_outline:
                             self.canvas.itemconfig(rect, outline="#00b5d8", width=3)
 
-                # token text
+                # escape path overlay
+                if self.show_escape_overlay.get() and self.escape_path is not None:
+                    if rc in esc_path_set and tok != "W":
+                        # thick orange outline on path cells
+                        self.canvas.itemconfig(rect, outline="#f59e0b", width=4)
+
+                # cell text
                 self.canvas.create_text(
                     (x1 + x2) / 2,
                     (y1 + y2) / 2,
@@ -260,21 +285,19 @@ class HorseMazeGUI:
                     font=("Consolas", 12, "bold"),
                     )
 
-                # value overlay (small)
+                # value overlay
                 if self.show_values.get() and tok not in {"W", "B"}:
                     v = cell.value
                     if v != 0:
                         self.canvas.create_text(
-                            x2 - 4,
-                            y1 + 4,
+                            x2 - 4, y1 + 4,
                             text=f"{v:+d}",
                             anchor="ne",
-                            fill="#1a202c" if tok != "W" else "white",
+                            fill="#1a202c",
                             font=("Consolas", 8),
                             )
 
-        # Optional: draw portal links (tiny line) for clarity
-        # Only between the portal pair, once
+        # portal link lines (faint)
         drawn = set()
         for a, b in portal_pair.items():
             if (b, a) in drawn:
@@ -284,8 +307,14 @@ class HorseMazeGUI:
             br, bc = b
             ax, ay = ac * CELL + CELL/2, ar * CELL + CELL/2
             bx, by = bc * CELL + CELL/2, br * CELL + CELL/2
-            # faint line
             self.canvas.create_line(ax, ay, bx, by, fill="#9f7aea", width=2, dash=(4, 4))
+
+        # draw escape path as a polyline too (on top), if enabled
+        if self.show_escape_overlay.get() and self.escape_path is not None and len(self.escape_path) >= 2:
+            pts = []
+            for (rr, cc) in self.escape_path:
+                pts.extend([cc * CELL + CELL/2, rr * CELL + CELL/2])
+            self.canvas.create_line(*pts, fill="#f59e0b", width=5)
 
         self.canvas.config(scrollregion=(0, 0, width, height))
 
@@ -301,13 +330,8 @@ class HorseMazeGUI:
     def _describe_cell(self, rc: Coord) -> str:
         r, c = rc
         cell = self.p.grid[r][c]
-        tok = cell.token
-        if rc in self.blocks:
-            tok = "B"
-
+        tok = "B" if rc in self.blocks else cell.token
         region = self._current_region_for_display()
-        reachable_now = (rc in region)
-        reachable_true = (rc in self.true_region)
 
         lines = []
         lines.append(f"pos: ({r}, {c})")
@@ -315,14 +339,14 @@ class HorseMazeGUI:
         lines.append(f"kind: {cell.kind}")
         lines.append(f"value: {cell.value:+d}")
         lines.append(f"blocked: {'yes' if rc in self.blocks else 'no'}")
-        lines.append(f"reachable (shown): {'yes' if reachable_now else 'no'}")
-        lines.append(f"reachable (true): {'yes' if reachable_true else 'no'}")
+        lines.append(f"reachable (shown): {'yes' if rc in region else 'no'}")
+        lines.append(f"reachable (true): {'yes' if rc in self.true_region else 'no'}")
         lines.append(f"boundary: {'yes' if is_boundary(self.p, rc) else 'no'}")
-
         if cell.kind == "portal":
             pair = _build_portal_pair(self.p).get(rc)
             lines.append(f"portal -> {pair}")
-
+        if self.escape_path is not None and rc in set(self.escape_path):
+            lines.append("ON ESCAPE PATH")
         return "\n".join(lines)
 
     def _on_hover(self, event):
@@ -332,20 +356,47 @@ class HorseMazeGUI:
             return
         self.inspect_text.set(self._describe_cell(rc))
 
-    def _on_click(self, event):
+    def _on_right_click(self, event):
         rc = self._xy_to_cell(event)
         if rc is None:
             return
-        # lock the inspector text on click
+        self.inspect_text.set(self._describe_cell(rc))
+
+    def _on_left_click(self, event):
+        rc = self._xy_to_cell(event)
+        if rc is None:
+            return
+
+        # In solve mode, left click is just inspector-lock
+        if self.mode == "solve":
+            self.inspect_text.set(self._describe_cell(rc))
+            return
+
+        # Play mode: toggle block on AIR tiles only
+        r, c = rc
+        cell = self.p.grid[r][c]
+
+        if cell.kind != "air":
+            self.inspect_text.set(self._describe_cell(rc))
+            return
+
+        if rc in self.blocks:
+            self.blocks.remove(rc)
+        else:
+            if len(self.blocks) >= self.p.max_blocks:
+                messagebox.showwarning("Block limit", f"Max blocks reached: {self.p.max_blocks}")
+                return
+            self.blocks.add(rc)
+
+        self._recompute_state(reset_anim=True)
+        self._redraw()
         self.inspect_text.set(self._describe_cell(rc))
 
     def _copy_blocks(self):
         if not self.blocks:
             text = "(no blocks)"
         else:
-            # same format as console list
             text = "\n".join(f"({r}, {c})" for (r, c) in sorted(self.blocks))
-
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
         messagebox.showinfo("Copied", "Block placements copied to clipboard.")
@@ -354,16 +405,14 @@ class HorseMazeGUI:
         path = filedialog.asksaveasfilename(
             defaultextension=".txt",
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
-            title="Save solved grid",
+            title="Save grid",
         )
         if not path:
             return
 
-        # Save in reloadable format (same header + grid with B inserted)
         lines: List[str] = []
         lines.append(f"{self.p.rows} {self.p.cols}")
         lines.append(str(self.p.max_blocks))
-
         for r in range(self.p.rows):
             row = []
             for c in range(self.p.cols):
@@ -377,26 +426,27 @@ class HorseMazeGUI:
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
 
-        messagebox.showinfo("Saved", f"Saved solved grid to:\n{path}")
+        messagebox.showinfo("Saved", f"Saved to:\n{path}")
 
     def _save_png(self):
         path = filedialog.asksaveasfilename(
             defaultextension=".png",
             filetypes=[("PNG image", "*.png"), ("All files", "*.*")],
-            title="Save screenshot (rendered)",
+            title="Save screenshot",
         )
         if not path:
             return
 
-        # Render an image of the FULL grid (not just visible viewport)
         region = self._current_region_for_display()
+        esc_path = self.escape_path or []
+        esc_set = set(esc_path)
+
         img_w = self.p.cols * CELL
         img_h = self.p.rows * CELL
 
         img = Image.new("RGB", (img_w, img_h), "white")
         draw = ImageDraw.Draw(img)
 
-        # Use default font (works everywhere)
         try:
             font_main = ImageFont.truetype("consola.ttf", 16)
             font_small = ImageFont.truetype("consola.ttf", 10)
@@ -404,9 +454,10 @@ class HorseMazeGUI:
             font_main = ImageFont.load_default()
             font_small = ImageFont.load_default()
 
-        # helper to center text
-        def draw_centered_text(x1, y1, x2, y2, text, fill, font):
-            w, h = draw.textbbox((0, 0), text, font=font)[2:]
+        def draw_centered(x1, y1, x2, y2, text, fill, font):
+            box = draw.textbbox((0, 0), text, font=font)
+            w = box[2] - box[0]
+            h = box[3] - box[1]
             cx = (x1 + x2) // 2
             cy = (y1 + y2) // 2
             draw.text((cx - w // 2, cy - h // 2), text, fill=fill, font=font)
@@ -429,12 +480,10 @@ class HorseMazeGUI:
 
                 draw.rectangle([x1, y1, x2, y2], fill=fill, outline="#cbd5e0", width=1)
 
-                # boundary marks
                 if self.show_boundary_marks.get():
                     if (r == 0 or r == self.p.rows - 1 or c == 0 or c == self.p.cols - 1) and cell.kind != "wall":
                         draw.rectangle([x1+2, y1+2, x2-2, y2-2], outline="#f56565", width=1)
 
-                # reachable outline
                 if self.show_reachable_outline.get():
                     if rc in region and cell.kind != "wall" and tok != "B":
                         do_outline = True
@@ -443,19 +492,41 @@ class HorseMazeGUI:
                         if do_outline:
                             draw.rectangle([x1, y1, x2, y2], outline="#00b5d8", width=3)
 
-                draw_centered_text(x1, y1, x2, y2, tok, text_color, font_main)
+                if self.show_escape_overlay.get() and self.escape_path is not None:
+                    if rc in esc_set and tok != "W":
+                        draw.rectangle([x1, y1, x2, y2], outline="#f59e0b", width=4)
 
-                # value overlay
+                draw_centered(x1, y1, x2, y2, tok, text_color, font_main)
+
                 if self.show_values.get() and tok not in {"W", "B"}:
                     v = cell.value
                     if v != 0:
-                        s = f"{v:+d}"
-                        draw.text((x2 - 4, y1 + 2), s, fill="#1a202c", font=font_small, anchor="ra")
+                        draw.text((x2 - 4, y1 + 2), f"{v:+d}", fill="#1a202c", font=font_small, anchor="ra")
+
+        # escape polyline
+        if self.show_escape_overlay.get() and len(esc_path) >= 2:
+            pts = []
+            for (rr, cc) in esc_path:
+                pts.append((cc * CELL + CELL/2, rr * CELL + CELL/2))
+            draw.line(pts, fill="#f59e0b", width=5)
 
         img.save(path, "PNG")
         messagebox.showinfo("Saved", f"Saved PNG to:\n{path}")
 
-    # ---- Animation controls ----
+    def _clear_blocks(self):
+        self.blocks.clear()
+        self._recompute_state(reset_anim=True)
+        self._redraw()
+
+    def _check_escape_path(self):
+        self.escape_path = find_escape_path(self.p, self.blocks)
+        if self.escape_path is None:
+            messagebox.showinfo("Escape check", "✅ No escape path. The horse is enclosed.")
+        else:
+            messagebox.showwarning("Escape check", f"❌ Escape path exists (length {len(self.escape_path)}).\nHighlighted in orange.")
+        self._redraw()
+
+    # ---- Animation ----
     def _anim_start(self):
         if self.anim_running:
             return
@@ -476,7 +547,6 @@ class HorseMazeGUI:
     def _anim_tick(self):
         if not self.anim_running:
             return
-
         if self.anim_index < len(self.bfs_order):
             rc = self.bfs_order[self.anim_index]
             self.anim_region.add(rc)
@@ -485,11 +555,10 @@ class HorseMazeGUI:
             self.root.after(int(self.speed_ms.get()), self._anim_tick)
         else:
             self.anim_running = False
-            # leave the full discovered region showing
 
     def run(self):
         self.root.mainloop()
 
-def show_gui(p: Puzzle, sol: Solution) -> None:
-    app = HorseMazeGUI(p, sol)
+def show_gui(p: Puzzle, sol: Optional[Solution], mode: str = "solve") -> None:
+    app = HorseMazeGUI(p, sol, mode=mode)
     app.run()
